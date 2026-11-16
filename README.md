@@ -1,3 +1,11 @@
+> **ain-soph fork (`serving` branch, based on v0.1.0a8).** Changes for a long-running server on M5:
+> - `H3_GPU_BUDGET_MB=<MB>`: the DiT stage keeps an MLX buffer cache (up to ~0.5 MB per token) within this memory
+>   budget instead of the fixed 96 MB, which made MLX allocate fresh Metal buffers for most ops (1.2-1.8x faster DiT;
+>   outputs byte-identical).
+> - `H3_ZERO_COPY=1` with a page-aligned DiT (`h3-image-mlx align --models DIR`, which replaces the pinned file by
+>   `*.aligned16k.safetensors`): weights are read-only mmap views used in place from the page cache. In stream mode
+>   the DiT runs at resident speed with 2-6 GB wired instead of ~20 GB (1024² ~6 s next to a 70 GB chat model).
+
 
 
 ![H3 Image MLX in liquid-glass lettering on a blue gradient](assets/hero.jpg)

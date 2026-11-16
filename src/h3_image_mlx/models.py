@@ -20,10 +20,27 @@ def model_paths(precision="int8"):
     return tuple(entry["path"] for entry in manifest_for(precision)["files"])
 
 
+def dit_file(directory, precision="int8"):
+    """The DiT to load: its page-aligned copy (align.py) when present, else the pinned file."""
+    from .align import aligned_name
+
+    path = Path(directory).expanduser().resolve() / model_paths(precision)[0]
+    aligned = aligned_name(path)
+    return aligned if aligned.is_file() else path
+
+
 def check_models(directory, *, hashes=False, precision="int8"):
     directory = Path(directory).expanduser().resolve()
-    for entry in manifest_for(precision)["files"]:
+    for index, entry in enumerate(manifest_for(precision)["files"]):
         path = directory / entry["path"]
+        if index == 0 and dit_file(directory, precision) != path:
+            from .align import is_aligned, read_header
+
+            aligned = dit_file(directory, precision)
+            meta = read_header(aligned)[0].get("__metadata__") or {}
+            if not is_aligned(aligned) or meta.get("h3_source") != path.name:
+                raise ValueError(f"Not a page-aligned copy of {path.name}: {aligned}")
+            continue  # sizes differ by design; tensor bytes were verified when aligning
         if not path.is_file():
             raise FileNotFoundError(f"Missing model file: {path}. Run h3-image-mlx fetch --models '{directory}' --precision {precision} to complete this directory.")
         if path.stat().st_size != entry["bytes"]:
