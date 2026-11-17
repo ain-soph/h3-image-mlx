@@ -6,6 +6,16 @@
 >   encoder by `*.aligned16k.safetensors` copies): weights are read-only mmap views used in place from the page cache.
 >   Streamed, the DiT runs at resident speed with 2-6 GB wired instead of ~20 GB, and the 27 GB text encoder no longer
 >   copies itself per request (text stage 2.6 s -> 0.5 s; 1024² ~4 s next to a 70 GB chat model).
+> - DiT speed (2026-11-17, M5 Ultra, zero-copy stream; DiT 6 steps 1024² 2.48 -> 2.00 s, 2048² 9.90 -> 8.14 s,
+>   4096² 108.7 -> 56.4 s):
+>   - activation rotation + int8 quantization as one Metal kernel (fast Hadamard butterflies) instead of a float32
+>     256x256 matmul per group; `H3_ROTATE=reference` keeps the old formulation. Both differ from an exact float64
+>     rotation in the same ~0.0001% of int8 values, but the 6-step DiT amplifies any rounding change: the same seed
+>     gives a different (equally valid) image, as does a third formulation (H16 V H16).
+>   - GEMM tiles 64x128 (K step 64 below 2048 rows, 32 above) from a sweep at the DiT shapes; the 1046-row QKV
+>     projection ran at 82 TOPS with the old 128x64 tiles, 143 with these. Same bytes (exact int32 sums).
+>   - `H3_FUSION` (subset of modulate,swiglu,rope; unset = all): AdaLN shift/scale and gated residuals over the
+>     token segments, SwiGLU and the q/k rotary embedding as compiled kernels. Same bytes.
 
 
 
