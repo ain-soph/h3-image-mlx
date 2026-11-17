@@ -16,16 +16,36 @@
 
 在 Apple Silicon Mac 上用 MiniMax H3 Image 生图、编辑图片。优化本地推理速度，以约 7 GB 的推理进程峰值内存生成 4K 图像；提供命令行和 Python API，开箱即用。
 
+## 最近更新
+
+| 版本 | 适用芯片与模式 | 主要改进 | 实测芯片与整图耗时中位数 |
+| --- | --- | --- | --- |
+| 0.1.0a9 | M1–M4，macOS 低于 26.4，通用 INT8 后端 | 流式 INT8 推理使用 Metal 分块矩阵乘法。 | M4 Pro，1024×1024：250.55 → **101.56 秒**，缩短 59.5%。 |
+| 0.1.0a8 | M5 系列，W8A8 常驻模式 | 常驻推理使用更宽的 W8A8 计算块，并在 GPU 计算时加载权重。 | M5 Pro，1024×1024：26.49 → **18.93 秒**，缩短 28.5%。 |
+| 0.1.0a7 | M1–M4，或手动选择 `--backend portable` 的 M5。需 macOS 26.4 及以上，并通过 GPU 整数 TensorOps 检测 | 通用后端使用 INT8 TensorOps 加速大矩阵乘法。 | M5 Pro，1024×1024：141.84 → **41.13 秒**，缩短 71.0%。 |
+| 0.1.0a6 | M1–M4 的流式 INT8，或 M5 手动选择 `--backend portable` 的流式 INT8 | 流式推理在 GPU 计算当前块时预读下一块权重。 | M5 Pro，通用后端，512×512：124.28 → **56.40 秒**，缩短 54.6%。 |
+
+每行均为同机对比，两版使用相同的六步采样。[测试条件与原始数据](BENCHMARKS.md)
+
 ## 亮点
 
 - **Apple Silicon 原生推理。** 基于 MLX，充分利用 Mac 算力，在 Mac 本地运行 H3 Image，支持文生图和多图编辑。
-- **W8A8 量化与 Metal 加速。** 降低权重内存占用，提供通用 MLX 推理路径，并在支持的芯片上使用 W8A8 Metal TensorOps 加速。M1–M4 兼容。
+- **W8A8 量化与 Metal 加速。** 量化权重降低内存占用。在系统版本低于 macOS 26.4 的 M1–M4 Mac 上，a9 会自动为符合条件的大矩阵乘法启用 Metal 加速。M5 和 M6 默认使用 W8A8 Metal TensorOps。
 - **分阶段推理，按需分块加载。** 各阶段通过独立进程释放内存，去噪权重可逐块读取，大大减少峰值内存占用，为其他应用留出更多内存。
 - **分块预读，读取与计算重叠。** GPU 计算当前块时提前读取下一块权重，在保持低内存占用的同时减少等待。[开启预读与异步计算](#推荐开启分块推理加速)
 
 作为参考，在 1024×1024 同机实测中，开启两个开关的分块推理**与常驻速度基本持平**：**23.61 秒 vs 23.63 秒**，实测最高进程峰值从 **21.18 GB 降至 3.23 GB，减少约 85%**，输出逐像素一致。[测试条件与完整数据](#分块推理达到常驻速度)
 
 ### 实测数据
+
+在 M4 Pro（macOS 26.3）上，a9 将 1024×1024 流式 INT8 生图耗时中位数缩短了 **59.5%**。
+
+| 版本 | 整图耗时中位数 | 推理进程峰值占用中位数 |
+| --- | ---: | ---: |
+| 0.1.0a8 | 250.55 秒 | 2.44 GB |
+| 0.1.0a9 | **101.56 秒** | **2.30 GB** |
+
+<sub>两个版本在同一台机器上交错运行，各三次，六张 PNG 逐字节一致。[测试条件与原始数据](BENCHMARKS.md#h3-streamed-int8-on-m4-pro)</sub>
 
 M5 Pro 上，v0.1.0a8 的 INT8 常驻模式将 1024×1024 整图耗时中位数从 **26.49 秒降至 18.93 秒**，缩短 28.5%。推理进程峰值中位数从 21.08 GB 增至 21.67 GB。[同机无文件缓存实测](BENCHMARKS.md#h3-native-w8a8-on-m5-pro)。
 
@@ -84,7 +104,7 @@ M5 Pro 48 GB，`0.1.0a3`，1024×1024，相同权重、提示词和 seed，原�
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install 'h3-image-mlx==0.1.0a8'
+python -m pip install 'h3-image-mlx==0.1.0a9'
 
 h3-image-mlx fetch --models ./models
 h3-image-mlx generate --models ./models --output teapot.png \
@@ -100,7 +120,7 @@ h3-image-mlx generate --models ./models --output teapot.png \
 这些开关从 `0.1.0a2` 开始提供；升级后在单次命令中开启：
 
 ```bash
-python -m pip install --upgrade 'h3-image-mlx==0.1.0a8'
+python -m pip install --upgrade 'h3-image-mlx==0.1.0a9'
 H3_ASYNC=1 H3_PREFETCH=1 h3-image-mlx generate \
   --models ./models --dit-mode stream --output teapot.png \
   --prompt 'A yellow enamel teapot and a white cup on a blue wooden table.'

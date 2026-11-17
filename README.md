@@ -29,16 +29,36 @@
 
 Generate and edit images on an Apple Silicon Mac with MiniMax H3 Image. Optimized for fast inference, with 4K generation using around 7 GB of peak inference-process memory. Available through a CLI and Python API, ready to use out of the box.
 
+## Recent updates
+
+| Release | Intended hardware and mode | What changed | Measured hardware and median time |
+| --- | --- | --- | --- |
+| 0.1.0a9 | M1–M4 on macOS earlier than 26.4, portable INT8 | Tiled Metal projections speed up streamed INT8. | M4 Pro, 1024×1024: 250.55 → **101.56 s** (59.5% less time). |
+| 0.1.0a8 | M5 family, resident W8A8 | Resident inference overlaps weight loading with GPU work and uses wider W8A8 tiles. | M5 Pro, 1024×1024: 26.49 → **18.93 s** (28.5% less time). |
+| 0.1.0a7 | M1–M4, or M5 with `--backend portable`; macOS 26.4+ and a successful GPU integer TensorOps check | The portable backend uses INT8 TensorOps for larger matrix multiplications. | M5 Pro, 1024×1024: 141.84 → **41.13 s** (71.0% less time). |
+| 0.1.0a6 | M1–M4 with streamed INT8, or M5 with `--backend portable` and streamed INT8 | Streamed inference prefetches the next block while the GPU processes the current one. | M5 Pro, portable backend, 512×512: 124.28 → **56.40 s** (54.6% less time). |
+
+Each row compares two versions on the same machine with the same six-step sampler. [Test conditions and raw data](BENCHMARKS.md)
+
 ## Highlights
 
 - **Native Apple Silicon inference.** Built on MLX to take advantage of your Mac's compute capabilities, H3 Image runs locally with text-to-image generation and multi-image editing.
-- **W8A8 quantization and Metal acceleration.** Reduce weight memory usage with a portable MLX inference path, plus W8A8 Metal TensorOps acceleration on supported chips. Compatible with M1–M4.
+- **W8A8 quantization and Metal acceleration.** Quantized weights reduce memory use. On M1–M4 Macs running macOS earlier than 26.4, a9 automatically uses Metal to accelerate eligible large matrix multiplications. M5 and M6 use W8A8 Metal TensorOps by default.
 - **Staged inference with on-demand block loading.** Each stage runs in a separate process to release its memory on completion. Denoiser weights can be read one block at a time, greatly reducing peak memory usage and leaving more room for other apps.
 - **Overlap weight reads with GPU computation.** Prefetch the next block while evaluating the current one, keeping streaming memory low and reducing time spent waiting for weights. [Enable prefetch and async](#recommended-streaming-acceleration)
 
 In our 1024×1024 same-machine test, streaming with both switches **matched resident-mode speed**: **23.61 s vs 23.63 s**, with the highest measured process peak falling from **21.18 GB to 3.23 GB — about 85% lower**. Outputs matched pixel for pixel. [Test conditions and results](#streaming-at-resident-speed)
 
 ### Benchmark results
+
+On an M4 Pro running macOS 26.3, a9 cut median 1024×1024 generation time by **59.5%** in streamed INT8 mode.
+
+| Version | Median generation time | Median peak process footprint |
+| --- | ---: | ---: |
+| 0.1.0a8 | 250.55 s | 2.44 GB |
+| 0.1.0a9 | **101.56 s** | **2.30 GB** |
+
+<sub>Three runs per version, interleaved on the same machine. All six PNGs matched byte for byte. [Test conditions and raw data](BENCHMARKS.md#h3-streamed-int8-on-m4-pro)</sub>
 
 M5 Pro, resident INT8, 1024×1024: v0.1.0a8 reduced median generation time from **26.49 s to 18.93 s** (28.5%). Median peak process footprint increased from 21.08 GB to 21.67 GB. [Same-machine uncached results](BENCHMARKS.md#h3-native-w8a8-on-m5-pro).
 
@@ -97,7 +117,7 @@ Use Python 3.11 or later on a Mac with Metal. Allow 49.30 GB of disk space for a
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install 'h3-image-mlx==0.1.0a8'
+python -m pip install 'h3-image-mlx==0.1.0a9'
 
 h3-image-mlx fetch --models ./models
 h3-image-mlx generate --models ./models --output teapot.png \
@@ -113,7 +133,7 @@ This writes a 1024×1024 RGB PNG. Set `--width` and `--height` to change the siz
 Available from `0.1.0a2`; upgrade and enable both switches for this command:
 
 ```bash
-python -m pip install --upgrade 'h3-image-mlx==0.1.0a8'
+python -m pip install --upgrade 'h3-image-mlx==0.1.0a9'
 H3_ASYNC=1 H3_PREFETCH=1 h3-image-mlx generate \
   --models ./models --dit-mode stream --output teapot.png \
   --prompt 'A yellow enamel teapot and a white cup on a blue wooden table.'
