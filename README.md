@@ -1,4 +1,4 @@
-> **ain-soph fork (`serving` branch, based on v0.1.0a8).** Changes for a long-running server on M5:
+> **ain-soph fork (`serving` branch, upstream v0.1.0a9 merged).** Changes for a long-running server on M5:
 > - `H3_GPU_BUDGET_MB=<MB>`: the DiT stage keeps an MLX buffer cache (up to ~0.5 MB per token) within this memory
 >   budget instead of the fixed 96 MB, which made MLX allocate fresh Metal buffers for most ops (1.2-1.8x faster DiT;
 >   outputs byte-identical).
