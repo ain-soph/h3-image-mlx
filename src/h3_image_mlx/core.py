@@ -133,6 +133,25 @@ def rotate_quantize(x):
     return xq, xs
 
 
+def float_activations():
+    """(ain-soph fork, 2026-11-17) Projections whose int8 ConvRot weights run on float activations (W8A16) instead of
+    int8 ones. Default: the text encoder's down_proj. Measured on a 1024^2 prompt (evals/int8-principle/u5), int8
+    activations there carry almost all of the text encoder's activation-quantization error (embedding rel. error 0.0105
+    of 0.0106) while the projection is a small share of a one-off stage (and slower than bfloat16 at >= 2048 prompt
+    tokens). H3_FLOAT_ACT=<comma-separated projection names>, or "none" for int8 activations everywhere."""
+    names = os.environ.get("H3_FLOAT_ACT", "down_proj")
+    return set() if names == "none" else set(names.split(","))
+
+
+def w8a16(x, weight, scale):
+    """x @ dequantized int8 ConvRot weight, activations in their own float dtype: rotate x (float32), dequantize the
+    weight rows (float32, then the activation dtype) and multiply."""
+    shape = x.shape
+    xr = (x.astype(mx.float32).reshape(-1, 256) @ H256).reshape(shape).astype(x.dtype)
+    w = (weight.astype(mx.float32) * scale.reshape(-1, 1).astype(mx.float32)).astype(x.dtype)
+    return xr @ w.T
+
+
 def w8a8(x, weight, scale):
     rows = x.shape[0]
     n = weight.shape[0]
@@ -321,7 +340,10 @@ class Weights:
                     raise ValueError(f"Unsupported quantization: {prefix}: {metadata}")
                 self.validated_projections.add(prefix)
             self.int8_calls += 1
-            y = w8a8(x, w, self[prefix + ".weight_scale"])
+            if prefix.rsplit(".", 1)[-1] in float_activations():
+                y = w8a16(x, w, self[prefix + ".weight_scale"])
+            else:
+                y = w8a8(x, w, self[prefix + ".weight_scale"])
         else:
             y = x @ w.astype(x.dtype).T
         if self.lora is not None:
