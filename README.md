@@ -2,9 +2,10 @@
 > - `H3_GPU_BUDGET_MB=<MB>`: the DiT stage keeps an MLX buffer cache (up to ~0.5 MB per token) within this memory
 >   budget instead of the fixed 96 MB, which made MLX allocate fresh Metal buffers for most ops (1.2-1.8x faster DiT;
 >   outputs byte-identical).
-> - `H3_ZERO_COPY=1` with a page-aligned DiT (`h3-image-mlx align --models DIR`, which replaces the pinned file by
->   `*.aligned16k.safetensors`): weights are read-only mmap views used in place from the page cache. In stream mode
->   the DiT runs at resident speed with 2-6 GB wired instead of ~20 GB (1024² ~6 s next to a 70 GB chat model).
+> - `H3_ZERO_COPY=1` with page-aligned weights (`h3-image-mlx align --models DIR` replaces the pinned DiT and text
+>   encoder by `*.aligned16k.safetensors` copies): weights are read-only mmap views used in place from the page cache.
+>   Streamed, the DiT runs at resident speed with 2-6 GB wired instead of ~20 GB, and the 27 GB text encoder no longer
+>   copies itself per request (text stage 2.6 s -> 0.5 s; 1024² ~4 s next to a 70 GB chat model).
 
 
 

@@ -4,7 +4,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from .models import dit_file, model_paths, manifest_for
+from .models import dit_file, model_paths, manifest_for, text_file
 
 
 def select_backend(requested, device, precision="int8"):
@@ -49,7 +49,7 @@ def main(stage, work):
     if stage == "text":
         from .text import encode
         # H3_TEXT / H3_TOKENIZER / H3_VAE / H3_DIT: use another checkpoint (e.g. P-H3-Image) instead of the manifest's.
-        x, tags, _ = encode(os.environ.get("H3_TEXT") or models / text, os.environ.get("H3_TOKENIZER") or models / tokenizer, request["prompt"], refs)
+        x, tags, _ = encode(os.environ.get("H3_TEXT") or text_file(models, precision), os.environ.get("H3_TOKENIZER") or models / tokenizer, request["prompt"], refs)
         mx.save_safetensors(embedding, {"embedding": x, "tags": tags})
     elif stage == "references":
         from .ref_vae import encode_reference

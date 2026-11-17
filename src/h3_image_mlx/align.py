@@ -2,8 +2,8 @@
 
 Rewrites a safetensors file so every tensor's data starts on a 16 KiB page: the header is space-padded so the data
 section starts on a page, gaps are filled with U8 tensors named "__h3pad.N" (the format allows no holes), and the file
-ends on a page. Tensor bytes are copied unchanged and verified. `h3-image-mlx align --models DIR` aligns the pinned
-DiT in place of the original; models.py accepts the aligned file as the DiT.
+ends on a page. Tensor bytes are copied unchanged and verified. `h3-image-mlx align --models DIR` replaces the pinned
+DiT and text encoder by aligned copies; models.py accepts and prefers them.
 """
 import hashlib
 import json
@@ -92,15 +92,18 @@ def align_file(src, dst):
 
 
 def align_models(directory, precision="int8", keep_original=False):
-    """Align the pinned DiT of a model directory; remove the original unless keep_original."""
-    from .models import model_paths
+    """Align the pinned DiT and text encoder; remove each original unless keep_original."""
+    from .models import ALIGNABLE, model_paths
 
-    src = Path(directory).expanduser().resolve() / model_paths(precision)[0]
-    dst = aligned_name(src)
-    if not (dst.is_file() and is_aligned(dst)):
-        if not src.is_file():
-            raise FileNotFoundError(f"Missing DiT to align: {src}")
-        align_file(src, dst)
-    if src.is_file() and not keep_original:
-        src.unlink()
-    return dst
+    done = []
+    for index in ALIGNABLE:
+        src = Path(directory).expanduser().resolve() / model_paths(precision)[index]
+        dst = aligned_name(src)
+        if not (dst.is_file() and is_aligned(dst)):
+            if not src.is_file():
+                raise FileNotFoundError(f"Missing file to align: {src}")
+            align_file(src, dst)
+        if src.is_file() and not keep_original:
+            src.unlink()
+        done.append(str(dst))
+    return "\n".join(done)

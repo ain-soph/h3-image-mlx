@@ -76,7 +76,7 @@ def main(argv=None):
     )
     verify = commands.add_parser("verify", help="Verify pinned file hashes")
     align = commands.add_parser(
-        "align", help="Replace the DiT by a page-aligned copy for zero-copy loading (H3_ZERO_COPY=1)"
+        "align", help="Replace the DiT and text encoder by page-aligned copies for zero-copy loading (H3_ZERO_COPY=1)"
     )
     align.add_argument("--keep-original", action="store_true")
     for command in (gen, get, verify, align):
