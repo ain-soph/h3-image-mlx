@@ -210,6 +210,8 @@ def denoise(
     profile = dict(steps=[], eval_s=0.0)
     meta = w.header.get("__metadata__") or {}
     grid = sigmas = json.loads(meta["config"])["transformer"]["pdd_sigmas"] if "config" in meta else PH3_SIGMAS
+    if os.environ.get("H3_DEBUG_STEPS"):       # test only: stop after N steps (0 = the initial noise), for
+        sigmas = sigmas[:int(os.environ["H3_DEBUG_STEPS"]) + 1]   # first-step velocity comparisons
     # A checkpoint with an audio stream (P-H3-Image) is the joint model: a still image spans two audio latents.
     audio = 2 if "audio_patch_proj.weight" in w.header else 0
     # Opt-in few-step mode: H3_LORA=<file> beside the quantized weights, H3_STEPS on a shifted uniform grid.

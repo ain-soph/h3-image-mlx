@@ -133,6 +133,11 @@ def rotate_quantize(x):
     return xq, xs
 
 
+def _a16(prefix):
+    names = os.environ.get("H3_A16")
+    return bool(names) and (names == "all" or prefix.rsplit(".", 1)[-1] in names.split(","))
+
+
 def w8a8(x, weight, scale):
     rows = x.shape[0]
     n = weight.shape[0]
@@ -321,7 +326,14 @@ class Weights:
                     raise ValueError(f"Unsupported quantization: {prefix}: {metadata}")
                 self.validated_projections.add(prefix)
             self.int8_calls += 1
-            y = w8a8(x, w, self[prefix + ".weight_scale"])
+            if _a16(prefix):
+                # Test only (H3_A16=<suffixes>|all, 2026-11-17 INT8 audit): the same int8 weights with float
+                # activations (W8A16 emulated in float32) to measure each class's activation-quantization error.
+                xr = (x.astype(mx.float32).reshape(-1, 256) @ H256).reshape(x.shape)
+                wf = w.astype(mx.float32) * self[prefix + ".weight_scale"].reshape(-1, 1).astype(mx.float32)
+                y = (xr @ wf.T).astype(x.dtype)
+            else:
+                y = w8a8(x, w, self[prefix + ".weight_scale"])
         else:
             y = x @ w.astype(x.dtype).T
         if self.lora is not None:
