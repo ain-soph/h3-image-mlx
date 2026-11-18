@@ -23,7 +23,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse(package.joinpath("vae_stats.json").is_file())
         for name in ("MODEL_LICENSE.txt", "weights.json", "weights-bf16.json", "NOTICE.txt",
                      "kernels/LICENSE", "kernels/mpp_tensor_ops.metal",
-                     "kernels/w8a8_gemm_body.metal", "kernels/w8a8_epi_plain.metal"):
+                     "kernels/portable_simd.metal", "kernels/portable_tensor.metal"):
             self.assertTrue(package.joinpath(name).is_file(), name)
 
     def test_device_selection(self):
