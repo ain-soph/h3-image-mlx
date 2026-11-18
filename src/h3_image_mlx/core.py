@@ -8,30 +8,14 @@ import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
-from functools import cache
 from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
-KERNELS = ROOT / "kernels"
 backend = ContextVar("h3_backend", default="portable")
 legacy_int8_reads = ContextVar("h3_legacy_int8_reads", default=False)
 m5_resident = ContextVar("h3_m5_resident", default=False)
-
-
-@cache
-def tensorops_kernel():
-    return mx.fast.metal_kernel(
-        name="msv_w8a8_gemm",
-        input_names=["xq", "wq", "xs", "ws"],
-        output_names=["y"],
-        header=(KERNELS / "mpp_tensor_ops.metal").read_text(),
-        source=(KERNELS / "w8a8_gemm_body.metal").read_text()
-        + "\n"
-        + (KERNELS / "w8a8_epi_plain.metal").read_text(),
-    )
 
 
 H4 = np.ones((4, 4), dtype=np.float32)
@@ -66,11 +50,16 @@ def rotate_quantize_reference(x):
 
 def rotate_quantize(x, pad_rows=1):
     """Per-row int8 quantization of x H256 (block-diagonal along the last axis) with float32 scales.
-    The int8 rows are allocated up to a multiple of pad_rows (the GEMM tile height) so that the GEMM never reads
-    past them; the extra rows only feed output rows that are never stored."""
-    xq, xs = rotate_quantize_reference(x)
-    pad = -x.shape[0] % pad_rows if x.ndim == 2 else 0
-    return (mx.pad(xq, ((0, pad), (0, 0))) if pad else xq), xs
+    The fast kernel serves the M5 TensorOps path (backend w8a8); the portable path and H3_ROTATE=reference keep the
+    float32-matmul formulation. The int8 rows are allocated up to a multiple of pad_rows (the GEMM tile height) so
+    that the GEMM never reads past them; the extra rows only feed output rows that are never stored."""
+    if backend.get() != "w8a8" or os.environ.get("H3_ROTATE") == "reference" or x.ndim != 2 or x.shape[1] % 256:
+        xq, xs = rotate_quantize_reference(x)
+        pad = -x.shape[0] % pad_rows if x.ndim == 2 else 0
+        return (mx.pad(xq, ((0, pad), (0, 0))) if pad else xq), xs
+    # (ain-soph fork) The fused kernel is MLX's (mx.fast.convrot_quantize, ain-soph/mlx serving): one threadgroup
+    # per row, Hadamard-256 as base-4 butterflies, rows padded to a multiple of 128 (every GEMM tile height used here).
+    return mx.fast.convrot_quantize(x)
 
 
 def w8a8(x, weight, scale):
@@ -93,15 +82,8 @@ def w8a8(x, weight, scale):
         # narrower than one column tile, which the kernel cannot place inside the weight: float product
         acc = xq[:rows].astype(mx.float32) @ weight.astype(mx.float32).T
         return (acc * xs.reshape(-1, 1) * scale.reshape(1, -1)).astype(x.dtype)
-    (y,) = tensorops_kernel()(
-        inputs=[xq, weight, xs, scale.reshape(-1)],
-        template=[("BM", bm), ("BN", bn), ("BK", bk), ("T", x.dtype)],
-        grid=((n + bn - 1) // bn * 128, (rows + bm - 1) // bm, 1),
-        threadgroup=(128, 1, 1),
-        output_shapes=[(rows, n)],
-        output_dtypes=[x.dtype],
-    )
-    return y
+    # mlx-serve's INT8 TensorOps GEMM (MIT), in MLX (mx.fast.convrot_matmul_quantized) with this sweep's tiles
+    return mx.fast.convrot_matmul_quantized(xq, xs, weight, scale.reshape(-1), x.dtype, tiles=(bm, bn, bk))
 
 
 def _read_owned(fd, length, offset):

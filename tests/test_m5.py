@@ -40,12 +40,8 @@ class NativeProjection(unittest.TestCase):
                 xs = rng.uniform(.01, .1, m).astype(np.float32)
                 ws = rng.uniform(.01, .1, n).astype(np.float32)
                 expected = (a.astype(np.int64) @ b.astype(np.int64).T).astype(np.float32) * xs[:, None] * ws
-                if n < bn:
-                    continue  # narrower than a column tile: core.w8a8 takes its float product instead
-                xq = np.pad(a, ((0, -m % bm), (0, 0)))  # callers pad xq to a multiple of BM rows
-                (y,) = core.tensorops_kernel()(
-                    inputs=list(map(mx.array, [xq, b, xs, ws])),
-                    template=[("BM", bm), ("BN", bn), ("BK", 256), ("T", mx.bfloat16)],
-                    grid=((n + bn - 1) // bn * 128, (m + bm - 1) // bm, 1),
-                    threadgroup=(128, 1, 1), output_shapes=[(m, n)], output_dtypes=[mx.bfloat16])
+                xq = np.pad(a, ((0, -m % bm), (0, 0)))  # BM must divide the rows of xq
+                # the GEMM is MLX's (ain-soph/mlx serving), which also places tiles wider than N
+                y = mx.fast.convrot_matmul_quantized(*map(mx.array, [xq, xs, b, ws]), mx.bfloat16,
+                                                     tiles=(bm, bn, 256))
                 self.assertTrue(mx.array_equal(y, mx.array(expected).astype(mx.bfloat16)).item())
