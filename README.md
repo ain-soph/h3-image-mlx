@@ -3,7 +3,7 @@
 > | Change | Why | Enable / default | Effect (M5 Ultra) |
 > |---|---|---|---|
 > | DiT MLX cache budget | the fixed 96 MB cache allocated fresh Metal buffers for most ops | `H3_GPU_BUDGET_MB=<MB>` (off) | DiT 1.2–1.8× faster (2048² 21.7 → 13.5 s); byte-identical |
-> | Zero-copy page-aligned DiT and text encoder | use weights in place from the page cache | `h3-image-mlx align --models DIR`, then `H3_ZERO_COPY=1` (off) | 1024² 13.1 → 4.19 s; DiT footprint 2.88 → 1.95 GB; text stage 2.6 → 0.5 s; byte-identical |
+> | Zero-copy page-aligned DiT and text encoder | use weights in place from the page cache | `h3-image-mlx align --models DIR`, then `H3_ZERO_COPY=1` (off) | 1024² 13.1 → 4.19 s; DiT footprint 2.88 → 1.95 GB; text stage 2.6 → 0.5 s; byte-identical. Needs the [ain-soph/mlx](https://github.com/ain-soph/mlx/tree/serving) fork (`mx.SafetensorsFile`) |
 > | Rotate-quantize as one Metal kernel | an FP32 256×256 matmul per group | default; `H3_ROTATE=reference` = old | 16406×14336: 30.9 → 6.7 ms; same seed gives a different, equally valid image |
 > | GEMM tiles 64×128 (swept at DiT shapes) | 1046-row QKV ran at 82 TOPS | default; `H3_GEMM_TILES=128,64,64` = old | QKV 82 → 143 TOPS; byte-identical |
 > | Fused AdaLN / gated residual, SwiGLU, q/k RoPE | extra memory passes | `H3_FUSION` (default all; empty = off) | per block −4 % (1046 rows) to −17 % (16406 rows); byte-identical |
