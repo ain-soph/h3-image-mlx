@@ -114,12 +114,15 @@ def _rotate_quantize_kernel():
     )
 
 
-def rotate_quantize(x):
+def rotate_quantize(x, pad_rows=1):
     """Per-row int8 quantization of x H256 (block-diagonal along the last axis) with float32 scales.
     The fast kernel serves the M5 TensorOps path (backend w8a8); the portable path and H3_ROTATE=reference keep the
-    float32-matmul formulation."""
+    float32-matmul formulation. The int8 rows are allocated up to a multiple of pad_rows (the GEMM tile height) so
+    that the GEMM never reads past them; the extra rows only feed output rows that are never stored."""
     if backend.get() != "w8a8" or os.environ.get("H3_ROTATE") == "reference" or x.ndim != 2 or x.shape[1] % 256:
-        return rotate_quantize_reference(x)
+        xq, xs = rotate_quantize_reference(x)
+        pad = -x.shape[0] % pad_rows if x.ndim == 2 else 0
+        return (mx.pad(xq, ((0, pad), (0, 0))) if pad else xq), xs
     rows, k = x.shape
     groups = k // 256
     xq, xs = _rotate_quantize_kernel()(
@@ -127,7 +130,7 @@ def rotate_quantize(x):
         template=[("T", x.dtype), ("MAX_GROUPS", 1 << (groups - 1).bit_length())],
         grid=(256, rows, 1),
         threadgroup=(256, 1, 1),
-        output_shapes=[(rows, k), (rows,)],
+        output_shapes=[(-(-rows // pad_rows) * pad_rows, k), (rows,)],
         output_dtypes=[mx.int8, mx.float32],
     )
     return xq, xs
@@ -136,9 +139,9 @@ def rotate_quantize(x):
 def w8a8(x, weight, scale):
     rows = x.shape[0]
     n = weight.shape[0]
-    xq, xs = rotate_quantize(x)
     if backend.get() == "portable":
         from ._portable import portable_matmul
+        xq, xs = rotate_quantize(x)
         return portable_matmul(xq, weight, xs, scale.reshape(-1), x.dtype)
     if m5_resident.get():
         bm, bn = (32, 64) if rows <= 32 else (64, 128)
@@ -151,6 +154,11 @@ def w8a8(x, weight, scale):
         bm, bn, bk = 64, 128, (64 if rows < 2048 else 32)
         if os.environ.get("H3_GEMM_TILES"):
             bm, bn, bk = (int(v) for v in os.environ["H3_GEMM_TILES"].split(","))
+    xq, xs = rotate_quantize(x, pad_rows=bm)
+    if n < bn:
+        # narrower than one column tile, which the kernel cannot place inside the weight: float product
+        acc = xq[:rows].astype(mx.float32) @ weight.astype(mx.float32).T
+        return (acc * xs.reshape(-1, 1) * scale.reshape(1, -1)).astype(x.dtype)
     (y,) = tensorops_kernel()(
         inputs=[xq, weight, xs, scale.reshape(-1)],
         template=[("BM", bm), ("BN", bn), ("BK", bk), ("T", x.dtype)],
