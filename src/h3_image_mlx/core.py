@@ -2,7 +2,6 @@
 
 import fcntl
 import json
-import mmap
 import os
 import struct
 import time
@@ -40,8 +39,6 @@ H256 = mx.array(np.kron(np.kron(H4, H4), np.kron(H4, H4)) / 16)
 DTYPES = {"I8": "i1", "U8": "u1", "F16": "<f2", "BF16": "<u2", "F32": "<f4", "I64": "<i8"}
 # Zero-copy weights (ain-soph fork): see align.py.
 PAGE = 16384
-MX_DTYPES = {"I8": mx.int8, "U8": mx.uint8, "F16": mx.float16, "BF16": mx.bfloat16, "F32": mx.float32,
-             "I64": mx.int64}
 
 
 def page_aligned(header, start):
@@ -208,11 +205,13 @@ class Weights:
         self.pending = {}
         self.stats = dict(read_s=0.0, read_bytes=0, convert_s=0.0, wait_s=0.0)
         self.lora = None  # optional second Weights holding lora_A / lora_B / alpha per projection
-        # H3_ZERO_COPY=1 on a page-aligned file: tensors are views of one read-only mapping; Metal reads the page
-        # cache directly (no copy, no prefetch thread), and the OS may drop the pages when memory is needed.
+        # H3_ZERO_COPY=1 on a page-aligned file: each tensor is a view of one read-only mapping (MLX's
+        # SafetensorsFile, ain-soph/mlx `serving`); Metal reads the page cache directly (no copy, no prefetch
+        # thread), and the OS may drop the pages when memory is needed. None when MLX cannot map the file.
         self.mapped = None
         if flag("H3_ZERO_COPY") and page_aligned(self.header, self.start):
-            self.mapped = mmap.mmap(self.file.fileno(), 0, prot=mmap.PROT_READ)
+            mapped = mx.SafetensorsFile(path, zero_copy=True)
+            self.mapped = mapped if mapped.mapped else None
         self.alphas = {}
 
     def delta(self, prefix, x):
@@ -268,13 +267,9 @@ class Weights:
         shape = spec["shape"]
         if self.mapped is not None and row is None and b > a:
             t = time.perf_counter()
-            padded = (b - a + PAGE - 1) // PAGE * PAGE
-            raw = np.frombuffer(self.mapped, np.uint8, padded, self.start + a)
-            data = mx.from_dlpack(raw)[: b - a]
-            if spec["dtype"] != "U8":
-                data = data.view(MX_DTYPES[spec["dtype"]])
+            data = self.mapped[key]
             self.stats["convert_s"] += time.perf_counter() - t
-            return data.reshape(shape)
+            return data
         if row is not None:
             stride = (b - a) // shape[0]
             a += int(row) * stride
