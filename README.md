@@ -1,23 +1,17 @@
-> **ain-soph fork (`serving` branch, upstream v0.1.0a9 merged).** Changes for a long-running server on M5:
-> - `H3_GPU_BUDGET_MB=<MB>`: the DiT stage keeps an MLX buffer cache (up to ~0.5 MB per token) within this memory
->   budget instead of the fixed 96 MB, which made MLX allocate fresh Metal buffers for most ops (1.2-1.8x faster DiT;
->   outputs byte-identical).
-> - `H3_ZERO_COPY=1` with page-aligned weights (`h3-image-mlx align --models DIR` replaces the pinned DiT and text
->   encoder by `*.aligned16k.safetensors` copies): weights are read-only mmap views used in place from the page cache.
->   Streamed, the DiT runs at resident speed with 2-6 GB wired instead of ~20 GB, and the 27 GB text encoder no longer
->   copies itself per request (text stage 2.6 s -> 0.5 s; 1024² ~4 s next to a 70 GB chat model).
-> - DiT speed (2026-11-17, M5 Ultra, zero-copy stream; DiT 6 steps 1024² 2.48 -> 2.00 s, 2048² 9.90 -> 8.14 s,
->   4096² 108.7 -> 56.4 s):
->   - activation rotation + int8 quantization as one Metal kernel (fast Hadamard butterflies) instead of a float32
->     256x256 matmul per group; `H3_ROTATE=reference` keeps the old formulation. Both differ from an exact float64
->     rotation in the same ~0.0001% of int8 values, but the 6-step DiT amplifies any rounding change: the same seed
->     gives a different (equally valid) image, as does a third formulation (H16 V H16).
->   - GEMM tiles 64x128 (K step 64 below 2048 rows, 32 above) from a sweep at the DiT shapes; the 1046-row QKV
->     projection ran at 82 TOPS with the old 128x64 tiles, 143 with these. Same bytes (exact int32 sums).
->   - `H3_FUSION` (subset of modulate,swiglu,rope; unset = all): AdaLN shift/scale and gated residuals over the
->     token segments, SwiGLU and the q/k rotary embedding as compiled kernels. Same bytes.
-
-
+> **ain-soph fork (`serving` branch, based on upstream v0.1.0a9).** What differs from upstream:
+>
+> | Change | Why | Enable / default | Effect (M5 Ultra) |
+> |---|---|---|---|
+> | DiT MLX cache budget | the fixed 96 MB cache allocated fresh Metal buffers for most ops | `H3_GPU_BUDGET_MB=<MB>` (off) | DiT 1.2–1.8× faster (2048² 21.7 → 13.5 s); byte-identical |
+> | Zero-copy page-aligned DiT and text encoder | use weights in place from the page cache | `h3-image-mlx align --models DIR`, then `H3_ZERO_COPY=1` (off) | 1024² 13.1 → 4.19 s; DiT footprint 2.88 → 1.95 GB; text stage 2.6 → 0.5 s; byte-identical |
+> | Rotate-quantize as one Metal kernel | an FP32 256×256 matmul per group | default; `H3_ROTATE=reference` = old | 16406×14336: 30.9 → 6.7 ms; same seed gives a different, equally valid image |
+> | GEMM tiles 64×128 (swept at DiT shapes) | 1046-row QKV ran at 82 TOPS | default; `H3_GEMM_TILES=128,64,64` = old | QKV 82 → 143 TOPS; byte-identical |
+> | Fused AdaLN / gated residual, SwiGLU, q/k RoPE | extra memory passes | `H3_FUSION` (default all; empty = off) | per block −4 % (1046 rows) to −17 % (16406 rows); byte-identical |
+> | Kernel + tiles + fusion together | — | — | DiT 6 steps 1024² 2.48 → 2.00 s, 2048² 9.90 → 8.14 s, 4096² 108.7 → 56.4 s |
+> | W8A8 GEMM edge tiles stay inside their tensors | out-of-bounds reads on the last tile | always | byte-identical |
+> | No upper version bounds on runtime dependencies | one shared environment with other engines | — | — |
+>
+> Full numbers: [MiniMax H3 Image in ain-soph/llm-serving](https://github.com/ain-soph/llm-serving/blob/main/docs/performance.md#图片minimax-h3-image). Upstream PRs: [#20](https://github.com/Anionex/h3-image-mlx/pull/20), [#21](https://github.com/Anionex/h3-image-mlx/pull/21) (open).
 
 ![H3 Image MLX in liquid-glass lettering on a blue gradient](assets/hero.jpg)
 
