@@ -6,6 +6,7 @@ from functools import cache
 import itertools
 import json
 import os
+import re
 import time
 
 import numpy as np
@@ -70,15 +71,19 @@ def gated_add(x, y, gate, seg):
 PH3_SIGMAS = [1.0, 0.984753, 0.967905, 0.951688, 0.925372, 0.881923, 0.810083, 0.528718, 0.0]
 
 
-def qkv_attention(w, prefix, x, angles=None):
-    q, k, v = [
-        heads(t, 128) for t in mx.split(w.linear(prefix + ".qkv_proj", x), 3, -1)
-    ]
-    q = norm(q, w[prefix + ".q_norm.weight"])
-    k = norm(k, w[prefix + ".k_norm.weight"])
-    if angles is not None:
-        r = rope_fused if fused("rope") else rope
-        q, k = r(q, angles), r(k, angles)
+def qkv_attention(w, prefix, x, angles=None, trigonometry=None):
+    qkv = w.linear(prefix + ".qkv_proj", x)
+    q_weight, k_weight = w[prefix + ".q_norm.weight"], w[prefix + ".k_norm.weight"]
+    if trigonometry is not None and qkv.dtype == trigonometry[0].dtype:
+        from .qk_rope import normalize_rotate
+        q, k = normalize_rotate(qkv, q_weight, k_weight, trigonometry)
+        v = heads(qkv[:, qkv.shape[-1] * 2 // 3:], 128)
+    else:
+        q, k, v = [heads(t, 128) for t in mx.split(qkv, 3, -1)]
+        q, k = norm(q, q_weight), norm(k, k_weight)
+        if angles is not None:
+            r = rope_fused if fused("rope") else rope
+            q, k = r(q, angles), r(k, angles)
     return w.linear(prefix + ".out_proj", attention(q, k, v))
 
 
@@ -258,6 +263,21 @@ def denoise(
     segments.append((target_start, target_start + rows * cols, 0))
     seg = _segment_rows(segments) if fused("modulate") else None
     prefix = mx.concatenate(fixed)
+    trigonometry = None
+    if (
+        os.environ.get("H3_QK_NORM_ROPE") != "0"
+        and not resident
+        and backend.get() == "w8a8"
+        and fused("rope")
+        and text.dtype == mx.bfloat16
+        and angles.shape[0] >= 2048
+        and 0 < angles.shape[-1] <= 64
+        and angles.shape[-1] % 4 == 0
+        and re.search(r"\bApple M5\b", mx.device_info()["device_name"])
+    ):
+        from .qk_rope import prepare_angles
+        trigonometry = prepare_angles(angles, text.dtype)
+        mx.eval(*trigonometry)
     mx.eval(prefix)
     rng = np.random.default_rng(seed)
     latent = mx.array(rng.standard_normal((24, rows * 2, cols * 2), dtype=np.float32))
@@ -284,13 +304,13 @@ def denoise(
                 tab = mx.concatenate([tab, mods[i][-1, :1]])
             if seg is not None:
                 h = shifted_fused(norm(x, w[b + ".norm1.weight"]), tab[:, 1], tab[:, 0], seg)
-                x = gated_add(x, qkv_attention(w, b + ".attn", h, angles), tab[:, 2], seg)
+                x = gated_add(x, qkv_attention(w, b + ".attn", h, angles, trigonometry), tab[:, 2], seg)
                 h = shifted_fused(norm(x, w[b + ".norm2.weight"]), tab[:, 4], tab[:, 3], seg)
                 x = gated_add(x, mlp(w, b + ".mlp", h), tab[:, 5], seg)
             else:
                 h = shifted(norm(x, w[b + ".norm1.weight"]), tab[:, 1], tab[:, 0], segments)
                 x = x + modulate(
-                    qkv_attention(w, b + ".attn", h, angles), tab[:, 2], segments
+                    qkv_attention(w, b + ".attn", h, angles, trigonometry), tab[:, 2], segments
                 )
                 h = shifted(norm(x, w[b + ".norm2.weight"]), tab[:, 4], tab[:, 3], segments)
                 x = x + modulate(mlp(w, b + ".mlp", h), tab[:, 5], segments)
