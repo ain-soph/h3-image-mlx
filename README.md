@@ -7,6 +7,7 @@
 > | Rotate-quantize as one Metal kernel | an FP32 256×256 matmul per group | default; `H3_ROTATE=reference` = old | 16406×14336: 30.9 → 6.7 ms; same seed gives a different, equally valid image |
 > | GEMM tiles 64×128 (swept at DiT shapes) | 1046-row QKV ran at 82 TOPS | default; `H3_GEMM_TILES=128,64,64` = old | QKV 82 → 143 TOPS; byte-identical |
 > | Fused AdaLN / gated residual, SwiGLU, q/k RoPE | extra memory passes | `H3_FUSION` (default all; empty = off) | per block −4 % (1046 rows) to −17 % (16406 rows); byte-identical |
+> | Single-pass DiT Q/K RMSNorm and RoPE | fewer intermediate memory passes | Metal streaming W8A8 on M5, BF16 with at least 2048 rows; `H3_QK_NORM_ROPE=0` disables | 4K DiT about 1.3 s faster; byte-identical generation and two-reference editing samples |
 > | Kernel + tiles + fusion together | — | — | DiT 6 steps 1024² 2.48 → 2.00 s, 2048² 9.90 → 8.14 s, 4096² 108.7 → 56.4 s |
 > | W8A8 GEMM edge tiles stay inside their tensors | out-of-bounds reads on the last tile | always | byte-identical |
 > | No upper version bounds on runtime dependencies | one shared environment with other engines | — | — |
