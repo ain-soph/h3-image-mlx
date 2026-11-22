@@ -1,3 +1,15 @@
+> **ain-soph fork (`serving` branch, based on upstream `main` f988b2a, after v0.1.0a10).** What differs from upstream:
+>
+> | Change | Why | Enable / default | Effect (M5 Ultra) |
+> |---|---|---|---|
+> | Rotate-quantize and INT8 TensorOps GEMM from MLX (`mx.fast.convrot_*`) | an FP32 256×256 matmul per group; one shared kernel with other engines | default on the M5 W8A8 path; `H3_ROTATE=reference` = upstream rotation. Needs the [ain-soph/mlx](https://github.com/ain-soph/mlx/tree/serving) fork | rotate 16406×14336: 30.9 → 6.7 ms; same seed gives a different, equally valid image |
+> | Zero-copy reads through MLX's `SafetensorsFile` | one read-only mapping owned by MLX | `H3_ZERO_COPY=1` as upstream. Needs the ain-soph/mlx fork | byte-identical |
+> | Single-pass DiT Q/K RMSNorm and RoPE | fewer intermediate memory passes | Metal streaming W8A8 on M5, BF16 with at least 2048 rows; `H3_QK_NORM_ROPE=0` disables | 4K DiT about 1.3 s faster; byte-identical |
+> | W8A8 GEMM edge tiles stay inside their tensors | out-of-bounds reads on the last tile when M or N is not a tile multiple | always | byte-identical |
+> | A/B switches for the upstream fusion and tiles | benchmarks | `H3_FUSION` (default all; empty = off), `H3_GEMM_TILES=bm,bn,bk` | unset = upstream |
+> | No upper version bounds on runtime dependencies | one shared environment with other engines | — | — |
+>
+> Full numbers: [MiniMax H3 Image in ain-soph/llm-serving](https://github.com/ain-soph/llm-serving/blob/main/docs/performance.md#图片minimax-h3-image). Upstream PRs: [#20](https://github.com/Anionex/h3-image-mlx/pull/20), [#21](https://github.com/Anionex/h3-image-mlx/pull/21) (merged: cache budget, zero-copy, GEMM tiles and fusion now come from upstream).
 
 
 ![H3 Image MLX in liquid-glass lettering on a blue gradient](assets/hero.jpg)
