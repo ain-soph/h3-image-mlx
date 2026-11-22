@@ -58,18 +58,27 @@ def flag(name):
 
 
 @mx.compile
-def rotate_quantize(x):
+def rotate_quantize_reference(x):
     rotated = (x.astype(mx.float32).reshape(-1, 256) @ H256).reshape(x.shape)
     scale = mx.maximum(mx.max(mx.abs(rotated), axis=-1) / 127, 1e-20)
     return mx.clip(mx.round(rotated / scale[:, None]), -127, 127).astype(mx.int8), scale
 
 
+def rotate_quantize(x, pad_rows=1):
+    """Per-row int8 quantization of x H256 (block-diagonal along the last axis) with float32 scales.
+    The int8 rows are allocated up to a multiple of pad_rows (the GEMM tile height) so that the GEMM never reads
+    past them; the extra rows only feed output rows that are never stored."""
+    xq, xs = rotate_quantize_reference(x)
+    pad = -x.shape[0] % pad_rows if x.ndim == 2 else 0
+    return (mx.pad(xq, ((0, pad), (0, 0))) if pad else xq), xs
+
+
 def w8a8(x, weight, scale):
     rows = x.shape[0]
     n = weight.shape[0]
-    xq, xs = rotate_quantize(x)
     if backend.get() == "portable":
         from ._portable import portable_matmul
+        xq, xs = rotate_quantize(x)
         return portable_matmul(xq, weight, xs, scale.reshape(-1), x.dtype)
     if m5_resident.get():
         bm, bn = (32, 64) if rows <= 32 else (64, 128)
@@ -79,6 +88,11 @@ def w8a8(x, weight, scale):
         # projection (the 1046-row QKV GEMM: 128x64 82 TOPS, 2.94 ms; 64x128 143 TOPS, 1.69 ms), and K steps of 32
         # win from about 2000 rows up. The int32 sums are exact, so every tiling gives the same bytes.
         bm, bn, bk = 64, 128, (64 if rows < 2048 else 32)
+    xq, xs = rotate_quantize(x, pad_rows=bm)
+    if n < bn:
+        # narrower than one column tile, which the kernel cannot place inside the weight: float product
+        acc = xq[:rows].astype(mx.float32) @ weight.astype(mx.float32).T
+        return (acc * xs.reshape(-1, 1) * scale.reshape(1, -1)).astype(x.dtype)
     (y,) = tensorops_kernel()(
         inputs=[xq, weight, xs, scale.reshape(-1)],
         template=[("BM", bm), ("BN", bn), ("BK", bk), ("T", x.dtype)],
