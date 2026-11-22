@@ -76,7 +76,10 @@ def w8a8(x, weight, scale):
         # Tile sweep at the DiT shapes on an M5 Ultra: 64x128 output tiles are the fastest or within 3% for every
         # projection (the 1046-row QKV GEMM: 128x64 82 TOPS, 2.94 ms; 64x128 143 TOPS, 1.69 ms), and K steps of 32
         # win from about 2000 rows up. The int32 sums are exact, so every tiling gives the same bytes.
+        # (ain-soph fork) H3_GEMM_TILES=bm,bn,bk overrides the tiles (A/B).
         bm, bn, bk = 64, 128, (64 if rows < 2048 else 32)
+        if os.environ.get("H3_GEMM_TILES"):
+            bm, bn, bk = (int(v) for v in os.environ["H3_GEMM_TILES"].split(","))
     xq, xs = rotate_quantize(x, pad_rows=bm)
     if n < bn:
         # narrower than one column tile, which the kernel cannot place inside the weight: float product

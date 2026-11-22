@@ -11,11 +11,23 @@ import time
 import numpy as np
 from .core import Weights, attention, backend, flag, heads, m5_resident, mx, norm, rope, swiglu
 
-# Fused elementwise ops of the DiT blocks. Each fused form performs the same bfloat16 operations in the same
-# order as the composed ops, so the result is the same bytes; only the number of passes over the activations
-# changes. modulate: AdaLN shift/scale and the gated residual over the [text | ... | image] segments in one
-# compiled kernel each (a per-row select between the table rows) instead of per-segment ops, a concatenate and
-# an add. swiglu / rope: the activation and the rotary embedding compiled.
+# (ain-soph fork) H3_FUSION: comma-separated subset of {modulate, swiglu, rope} for the DiT blocks; unset = all,
+# empty = none (the composed ops, for A/B). Each fused form performs the same bfloat16 operations in the same order,
+# so the result is the same bytes; only the number of passes over the activations changes.
+#   modulate: AdaLN shift/scale and the gated residual over the [text | ... | image] segments in one compiled
+#             kernel each (a per-row select between the table rows) instead of per-segment ops + concatenate + add.
+#   swiglu:   gate * sigmoid(gate) * up in one compiled kernel.
+#   rope:     the rotary embedding of q and k compiled (cos/sin and the four products fused).
+_FUSION_ALL = ("modulate", "swiglu", "rope")
+
+
+def fused(name):
+    value = os.environ.get("H3_FUSION")
+    if value is None:
+        return True
+    return name in {part.strip() for part in value.split(",")}
+
+
 swiglu_fused = mx.compile(swiglu)
 rope_fused = mx.compile(rope)
 
@@ -65,12 +77,14 @@ def qkv_attention(w, prefix, x, angles=None):
     q = norm(q, w[prefix + ".q_norm.weight"])
     k = norm(k, w[prefix + ".k_norm.weight"])
     if angles is not None:
-        q, k = rope_fused(q, angles), rope_fused(k, angles)
+        r = rope_fused if fused("rope") else rope
+        q, k = r(q, angles), r(k, angles)
     return w.linear(prefix + ".out_proj", attention(q, k, v))
 
 
 def mlp(w, prefix, x):
-    return w.linear(prefix + ".fc2", swiglu_fused(w.linear(prefix + ".fc1", x)))
+    act = swiglu_fused if fused("swiglu") else swiglu
+    return w.linear(prefix + ".fc2", act(w.linear(prefix + ".fc1", x)))
 
 
 def prepare_text(w, embedding):
@@ -242,7 +256,7 @@ def denoise(
         segments.append((audio_start, audio_start + 2 * audio, 2))
         target_start += 2 * audio
     segments.append((target_start, target_start + rows * cols, 0))
-    seg = _segment_rows(segments)
+    seg = _segment_rows(segments) if fused("modulate") else None
     prefix = mx.concatenate(fixed)
     mx.eval(prefix)
     rng = np.random.default_rng(seed)
@@ -268,10 +282,18 @@ def denoise(
             tab = mods[i][step]
             if refs:
                 tab = mx.concatenate([tab, mods[i][-1, :1]])
-            h = shifted_fused(norm(x, w[b + ".norm1.weight"]), tab[:, 1], tab[:, 0], seg)
-            x = gated_add(x, qkv_attention(w, b + ".attn", h, angles), tab[:, 2], seg)
-            h = shifted_fused(norm(x, w[b + ".norm2.weight"]), tab[:, 4], tab[:, 3], seg)
-            x = gated_add(x, mlp(w, b + ".mlp", h), tab[:, 5], seg)
+            if seg is not None:
+                h = shifted_fused(norm(x, w[b + ".norm1.weight"]), tab[:, 1], tab[:, 0], seg)
+                x = gated_add(x, qkv_attention(w, b + ".attn", h, angles), tab[:, 2], seg)
+                h = shifted_fused(norm(x, w[b + ".norm2.weight"]), tab[:, 4], tab[:, 3], seg)
+                x = gated_add(x, mlp(w, b + ".mlp", h), tab[:, 5], seg)
+            else:
+                h = shifted(norm(x, w[b + ".norm1.weight"]), tab[:, 1], tab[:, 0], segments)
+                x = x + modulate(
+                    qkv_attention(w, b + ".attn", h, angles), tab[:, 2], segments
+                )
+                h = shifted(norm(x, w[b + ".norm2.weight"]), tab[:, 4], tab[:, 3], segments)
+                x = x + modulate(mlp(w, b + ".mlp", h), tab[:, 5], segments)
             t = time.perf_counter()
             if resident_batch:
                 if i % 5 == 4:
