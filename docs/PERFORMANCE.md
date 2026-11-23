@@ -51,6 +51,8 @@ All are optional; unset means disabled.
 | `H3_ASYNC=1` | Queue DiT blocks with `mx.async_eval` and overlap work between adjacent blocks |
 | `H3_PREFETCH=1` | Read the next block's raw weight bytes on a worker thread; MLX calls remain on the main thread |
 | `H3_EMBED_CACHE=<directory>` | Reuse text-stage output for repeated prompts and ordered references |
+| `H3_REF_CACHE=<directory>` | Reuse each reference image's VAE latent (ain-soph fork) |
+| `H3_ROW_SLICE=16384`, `H3_ROW_SLICE_FROM=35000` | Over FROM rows, the DiT's row-wise work runs in ROW_SLICE-row slices (default on; byte-identical; `H3_ROW_SLICE=0` off; ain-soph fork) |
 | `H3_PROFILE=<file.json>` | Save DiT timing, weight-read statistics and the MLX allocator peak |
 
 ### Repeated-prompt cache
@@ -61,7 +63,7 @@ H3_EMBED_CACHE=./.h3-embedding-cache h3-image-mlx generate \
   --prompt 'A yellow enamel teapot and a white cup on a blue wooden table.'
 ```
 
-The first request writes the cache; a matching request skips text encoding. Denoising, image decoding and reference VAE encoding still run. Cache files take disk space. Use a separate cache directory for concurrent jobs, and clear or change the directory after replacing text weights or the tokenizer. Remove `H3_EMBED_CACHE` to stop using the cache; delete that cache directory to reclaim its space.
+The first request writes the cache; a matching request skips text encoding. Denoising and image decoding still run. The key covers the prompt, the reference images' bytes, the text weights and tokenizer, this package's code and the installed MLX build, so replacing any of them starts new entries. `H3_REF_CACHE=<directory>` keeps one VAE latent per reference image (its bytes, not its name or position), so an edit that reuses pictures with a new prompt skips their VAE encoding. A hit hands the next stage the same file a miss writes: the image is byte-identical. Least recently used entries are deleted once a directory exceeds `H3_EMBED_CACHE_MB` (default 1024) or `H3_REF_CACHE_MB` (default 256); a text entry is about 0.2 MB for a text-only prompt and about 10 MB per 1024² reference, a latent 0.38 MB per 1024² reference. Writes are atomic, so concurrent jobs may share a directory. Remove the variables to stop using the caches; delete the directories to reclaim their space.
 
 ### Profiling
 

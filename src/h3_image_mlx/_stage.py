@@ -38,7 +38,10 @@ def main(stage, work):
     # after the stage's own measured peak.
     models = Path(request["models"])
     refs = request["references"]
-    embedding, latents, result = (str(work / (key + ".safetensors")) for key in ("embedding", "references", "latent"))
+    embedding, result = (str(work / (key + ".safetensors")) for key in ("embedding", "latent"))
+    # (ain-soph fork) One file per reference latent, so that pipeline.generate can serve some from its cache
+    # (H3_REF_CACHE) and have this stage encode only the rest (request["encode_references"]).
+    latents = [str(work / f"reference-{i}.safetensors") for i in range(len(refs))]
     mode = request.get("dit_mode")
     auto_resident = mode == "auto" and backend == "w8a8" and info["memory_size"] >= 32 * 1024**3
     # The exact DiT sequence length becomes available after encoding.
@@ -54,16 +57,14 @@ def main(stage, work):
         from .ref_vae import encode_reference
         weights = core.Weights(models / vae, True)
         stats = json.loads((models / vae_config).read_text())
-        zs = {}
-        for i, ref in enumerate(refs):
-            zs[str(i)] = encode_reference(weights, ref, stats)
-            mx.eval(zs[str(i)])
-        mx.save_safetensors(latents, zs)
+        for i in request.get("encode_references", range(len(refs))):
+            z = encode_reference(weights, refs[i], stats)
+            mx.eval(z)
+            mx.save_safetensors(latents[i], {"latent": z})
     elif stage == "dit":
         from .dit import denoise
         inputs = mx.load(embedding)
-        images = mx.load(latents) if refs else {}
-        zs = [images[str(i)] for i in range(len(refs))]
+        zs = [mx.load(path)["latent"] for path in latents]
         width, height = request["width"], request["height"]
         rows = inputs["embedding"].shape[0] + width * height // 1024 + sum(z.shape[1] * z.shape[2] // 4 for z in zs)
         resident = mode == "resident" or (auto_resident and rows <= 8192)

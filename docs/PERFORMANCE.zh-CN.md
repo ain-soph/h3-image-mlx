@@ -51,6 +51,8 @@ M5 Pro 48 GB，`0.1.0a3`，1024×1024。开启预读与异步后，分块推理�
 | `H3_ASYNC=1` | 用 `mx.async_eval` 排入 DiT 块，让相邻块的工作重叠 |
 | `H3_PREFETCH=1` | 工作线程预读下一块的原始权重字节，MLX 调用仍在主线程执行 |
 | `H3_EMBED_CACHE=<目录>` | 复用相同提示词和有序参考图的文本阶段输出 |
+| `H3_REF_CACHE=<目录>` | 按参考图复用 VAE 潜变量（ain-soph fork） |
+| `H3_ROW_SLICE=16384`、`H3_ROW_SLICE_FROM=35000` | 序列超过 FROM 行时 DiT 逐行计算按 ROW_SLICE 行分片（默认开；逐字节一致；`H3_ROW_SLICE=0` 关闭；ain-soph fork） |
 | `H3_PROFILE=<文件.json>` | 保存 DiT 耗时、权重读取统计和 MLX 分配器峰值 |
 
 ### 重复提示词缓存
@@ -61,7 +63,7 @@ H3_EMBED_CACHE=./.h3-embedding-cache h3-image-mlx generate \
   --prompt 'A yellow enamel teapot and a white cup on a blue wooden table.'
 ```
 
-首轮写入缓存，命中后跳过文本编码。去噪、图像解码和参考图 VAE 编码仍会执行。缓存占用磁盘；并发任务应使用独立缓存目录，更换文本权重或 tokenizer 后应清空或更换目录。移除 `H3_EMBED_CACHE` 可停止使用缓存，删除对应缓存目录可回收空间。
+首轮写入缓存，命中后跳过文本编码；去噪和图像解码仍会执行。键包含提示词、参考图字节、文本权重与 tokenizer、本包代码和已安装的 MLX 构建，任一变化都会写新条目。`H3_REF_CACHE=<目录>` 按参考图（按字节，与文件名和顺序无关）保存 VAE 潜变量，换提示词复用同一批图时跳过它们的 VAE 编码。命中时下一阶段读到的文件与未命中时写出的相同，输出逐字节一致。目录超过 `H3_EMBED_CACHE_MB`（默认 1024）或 `H3_REF_CACHE_MB`（默认 256）时删除最久未用的条目；纯文本提示词约 0.2 MB，每张 1024² 参考图约 10 MB，潜变量每张 1024² 约 0.38 MB。写入是原子的，并发任务可共用目录。移除这两个变量即停用，删除目录即回收空间。
 
 ### 性能记录
 
