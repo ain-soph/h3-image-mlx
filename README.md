@@ -7,6 +7,8 @@
 > | Single-pass DiT Q/K RMSNorm and RoPE | fewer intermediate memory passes | Metal streaming W8A8 on M5, BF16 with at least 2048 rows; `H3_QK_NORM_ROPE=0` disables | 4K DiT about 1.3 s faster; byte-identical |
 > | W8A8 GEMM edge tiles stay inside their tensors | out-of-bounds reads on the last tile when M or N is not a tile multiple | always | byte-identical |
 > | A/B switches for the upstream fusion and tiles | benchmarks | `H3_FUSION` (default all; empty = off), `H3_GEMM_TILES=bm,bn,bk` | unset = upstream |
+> | Bounded stage caches: the text-stage output (upstream `H3_EMBED_CACHE`) keyed also on this code and the MLX build, plus a per-picture reference VAE latent cache | repeated prompts, `n` > 1 and edit rounds re-encode the same inputs | `H3_EMBED_CACHE=dir`, `H3_REF_CACHE=dir` (off); least recently used out past `H3_EMBED_CACHE_MB=1024` / `H3_REF_CACHE_MB=256` | repeated 1024² 3.17 → 2.62 s; 4-picture edit 33.2 → 24.0 s (same pictures, new prompt 27.8 s); byte-identical |
+> | Row-sliced DiT projections for very long edit sequences | the DiT stage outgrew a 10 GB budget | over `H3_ROW_SLICE_FROM=35000` rows, slices of `H3_ROW_SLICE=16384`; `H3_ROW_SLICE=0` off | 2048² + 16 pictures: 10.6 → 8.3 GB, +5% time; shorter sequences unchanged; byte-identical |
 > | No upper version bounds on runtime dependencies | one shared environment with other engines | — | — |
 >
 > Full numbers: [MiniMax H3 Image in ain-soph/llm-serving](https://github.com/ain-soph/llm-serving/blob/main/docs/performance.md#图片minimax-h3-image). Upstream PRs: [#20](https://github.com/Anionex/h3-image-mlx/pull/20), [#21](https://github.com/Anionex/h3-image-mlx/pull/21) (merged: cache budget, zero-copy, GEMM tiles and fusion now come from upstream).
