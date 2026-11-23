@@ -82,6 +82,12 @@ def main(stage, work):
             # Measured DiT peaks without cache (MB): resident ~21300-21800 at 1024^2-2048^2; stream ~2700 / 3100 /
             # 6200 at 1046 / 4118 / 16406 tokens. Plus 500 MB margin.
             own_peak = 22000 if resident and not zero_copy else 3000 + rows * 23 // 100
+            from .dit import sliced
+            if not resident and sliced(rows):
+                # (ain-soph fork) Row-sliced (dit.ROW_SLICE_FROM): footprint without cache 4505 / 5425 MB at 24632 /
+                # 34003 rows (about 2100 + 0.1 per row), plus 500 MB margin; the freed room goes to the buffer cache
+                # (37075 rows: 8283 MB with it, against 10623 MB whole).
+                own_peak = 2600 + rows // 10
             cache = min(rows // 2, budget - own_peak)    # MB
             if cache > 96:
                 mx.set_cache_limit(cache << 20)

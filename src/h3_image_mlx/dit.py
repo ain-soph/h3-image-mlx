@@ -1,6 +1,7 @@
 """Text-to-image forward on the six-step H3 Image grid."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import cache
 
 import itertools
@@ -27,6 +28,53 @@ def fused(name):
     if value is None:
         return True
     return name in {part.strip() for part in value.split(",")}
+
+
+# (ain-soph fork) Row slicing for long edit sequences. A sequence of more than H3_ROW_SLICE_FROM rows (default
+# 35000) runs its row-wise work (the QKV projection with Q/K norm and RoPE, the output projection and the MLP) in
+# slices of H3_ROW_SLICE rows (default 16384, FreeVideo's h3_dit.ROW_SLICE; 0 = never slice); attention still sees
+# the whole sequence. Every slice is the same arithmetic on the same rows (int8 activations carry one scale per row,
+# the W8A8 GEMM sums in int32), so the bytes do not change, and the slices' temporaries (the MLP's 28672-wide fc1
+# output above all) stop growing with the sequence. Each extra slice streams the block's weights once more (about
+# 5.5 s per image on an M5 Ultra), so only sequences that would not fit a 10 GB budget whole are sliced: whole, the
+# DiT stage peaks at 9.7 GB for 1024^2 + 16 references (34003 rows) and 10.6 GB for 2048^2 + 16 references (37075
+# rows), sliced 8.3 GB (+5% time).
+ROW_SLICE = int(os.environ.get("H3_ROW_SLICE") or 16384)
+ROW_SLICE_FROM = int(os.environ.get("H3_ROW_SLICE_FROM") or 35000)
+
+
+def sliced(rows):
+    """Whether a sequence of this many rows runs in row slices."""
+    return ROW_SLICE > 0 and rows > max(ROW_SLICE, ROW_SLICE_FROM)
+
+
+def _slices(rows):
+    if not sliced(rows):
+        return None
+    return [slice(start, min(start + ROW_SLICE, rows)) for start in range(0, rows, ROW_SLICE)]
+
+
+@contextmanager
+def _held(w, *prefixes):
+    """Read each projection's tensors once for all slices (a streamed Weights without a mapping reads per access)."""
+    keys = [prefix + suffix for prefix in prefixes for suffix in (".weight", ".weight_scale", ".bias")]
+    keys = [key for key in keys if key in w.header and key not in w.cache]
+    for key in keys:
+        w.cache[key] = w[key]
+    try:
+        yield
+    finally:
+        for key in keys:
+            w.cache.pop(key, None)
+
+
+def by_rows(w, prefixes, x, fn):
+    """fn(x) on ROW_SLICE-row slices of x, concatenated; fn(x) itself for a short sequence."""
+    parts = _slices(x.shape[0])
+    if parts is None:
+        return fn(x)
+    with _held(w, *prefixes):
+        return mx.concatenate([fn(x[part]) for part in parts])
 
 
 swiglu_fused = mx.compile(swiglu)
@@ -71,9 +119,10 @@ def gated_add(x, y, gate, seg):
 PH3_SIGMAS = [1.0, 0.984753, 0.967905, 0.951688, 0.925372, 0.881923, 0.810083, 0.528718, 0.0]
 
 
-def qkv_attention(w, prefix, x, angles=None, trigonometry=None):
+def qkv_project(w, prefix, x, angles=None, trigonometry=None, q_weight=None, k_weight=None):
     qkv = w.linear(prefix + ".qkv_proj", x)
-    q_weight, k_weight = w[prefix + ".q_norm.weight"], w[prefix + ".k_norm.weight"]
+    if q_weight is None:
+        q_weight, k_weight = w[prefix + ".q_norm.weight"], w[prefix + ".k_norm.weight"]
     if trigonometry is not None and qkv.dtype == trigonometry[0].dtype:
         from .qk_rope import normalize_rotate
         q, k = normalize_rotate(qkv, q_weight, k_weight, trigonometry)
@@ -84,12 +133,31 @@ def qkv_attention(w, prefix, x, angles=None, trigonometry=None):
         if angles is not None:
             r = rope_fused if fused("rope") else rope
             q, k = r(q, angles), r(k, angles)
-    return w.linear(prefix + ".out_proj", attention(q, k, v))
+    return q, k, v
+
+
+def qkv_attention(w, prefix, x, angles=None, trigonometry=None):
+    parts = _slices(x.shape[0])
+    if parts is None:
+        q, k, v = qkv_project(w, prefix, x, angles, trigonometry)
+    else:
+        q_weight, k_weight = w[prefix + ".q_norm.weight"], w[prefix + ".k_norm.weight"]
+        with _held(w, prefix + ".qkv_proj"):
+            sliced = [qkv_project(w, prefix, x[part], None if angles is None else angles[part],
+                                  None if trigonometry is None else tuple(t[part] for t in trigonometry),
+                                  q_weight, k_weight) for part in parts]
+        q, k, v = (mx.concatenate([piece[i] for piece in sliced], axis=2) for i in range(3))
+    out = attention(q, k, v)
+    return by_rows(w, (prefix + ".out_proj",), out, lambda part: w.linear(prefix + ".out_proj", part))
 
 
 def mlp(w, prefix, x):
     act = swiglu_fused if fused("swiglu") else swiglu
-    return w.linear(prefix + ".fc2", act(w.linear(prefix + ".fc1", x)))
+
+    def run(part):
+        return w.linear(prefix + ".fc2", act(w.linear(prefix + ".fc1", part)))
+
+    return by_rows(w, (prefix + ".fc1", prefix + ".fc2"), x, run)
 
 
 def prepare_text(w, embedding):
