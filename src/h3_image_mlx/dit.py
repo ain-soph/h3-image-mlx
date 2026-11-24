@@ -12,15 +12,20 @@ import time
 
 import numpy as np
 from .core import Weights, attention, backend, flag, heads, m5_resident, mx, norm, rope, swiglu
+from . import gate_norm
 
-# (ain-soph fork) H3_FUSION: comma-separated subset of {modulate, swiglu, rope} for the DiT blocks; unset = all,
+# (ain-soph fork) H3_FUSION: comma-separated subset of {modulate, swiglu, rope, norm} for the DiT blocks; unset = all,
 # empty = none (the composed ops, for A/B). Each fused form performs the same bfloat16 operations in the same order,
 # so the result is the same bytes; only the number of passes over the activations changes.
 #   modulate: AdaLN shift/scale and the gated residual over the [text | ... | image] segments in one compiled
 #             kernel each (a per-row select between the table rows) instead of per-segment ops + concatenate + add.
 #   swiglu:   gate * sigmoid(gate) * up in one compiled kernel.
 #   rope:     the rotary embedding of q and k compiled (cos/sin and the four products fused).
-_FUSION_ALL = ("modulate", "swiglu", "rope")
+#   norm:     (needs modulate) inside each block, RMSNorm + AdaLN shift/scale in one kernel (norm1), and the
+#             attention's gated residual + RMSNorm + shift/scale in one kernel (norm2) (gate_norm.py, after mlx-serve's
+#             msv_gate_norm_mod) instead of gated add, rms_norm and shift kernels. Not across blocks (the MLP residual
+#             with the next block's norm1): that was 2-3% slower at 2048^2 / 1 picture and kept more memory.
+_FUSION_ALL = ("modulate", "swiglu", "rope", "norm")
 
 
 def fused(name):
@@ -332,13 +337,15 @@ def denoise(
     seg = _segment_rows(segments) if fused("modulate") else None
     prefix = mx.concatenate(fixed)
     trigonometry = None
+    # (ain-soph fork) Every sequence length by default since 2026-11-23 (was 2048 rows and up; also faster at 512^2 and
+    # 1024^2, same bytes); H3_QK_NORM_ROPE_FROM=rows keeps the composed ops for shorter sequences.
     if (
         os.environ.get("H3_QK_NORM_ROPE") != "0"
         and not resident
         and backend.get() == "w8a8"
         and fused("rope")
         and text.dtype == mx.bfloat16
-        and angles.shape[0] >= 2048
+        and angles.shape[0] >= int(os.environ.get("H3_QK_NORM_ROPE_FROM") or 0)
         and 0 < angles.shape[-1] <= 64
         and angles.shape[-1] % 4 == 0
         and re.search(r"\bApple M5\b", mx.device_info()["device_name"])
@@ -357,6 +364,7 @@ def denoise(
     sound = mx.array(rng.standard_normal((2 * audio, 32), dtype=np.float32)) if audio else None
     profile["setup_s"] = time.perf_counter() - began
     last = len(sigmas) - 2
+
     for step, (sigma, next_sigma) in enumerate(itertools.pairwise(sigmas)):
         start = time.monotonic()
         previous = None
@@ -364,13 +372,20 @@ def denoise(
         streams = [w.linear("audio_patch_proj", sound)] if audio else []
         streams.append(w.linear("video_patch_proj", patches))
         x = mx.concatenate([prefix, *(s.astype(text.dtype) for s in streams)])
+        seam = seg is not None and fused("norm") and gate_norm.supported(x)
         for i, b in enumerate(blocks):
             if (i < 49 or step < last) and not (native and step > 0):
                 w.ahead(blocks[(i + 1) % 50], keep=(b,))
             tab = mods[i][step]
             if refs:
                 tab = mx.concatenate([tab, mods[i][-1, :1]])
-            if seg is not None:
+            if seam:
+                h = gate_norm.norm_modulate(x, w[b + ".norm1.weight"], tab[:, 1], tab[:, 0], seg[0])
+                attn = qkv_attention(w, b + ".attn", h, angles, trigonometry)
+                x, h = gate_norm.norm_modulate(x, w[b + ".norm2.weight"], tab[:, 4], tab[:, 3], seg[0],
+                                               gated=(attn, tab[:, 2]))
+                x = gated_add(x, mlp(w, b + ".mlp", h), tab[:, 5], seg)
+            elif seg is not None:
                 h = shifted_fused(norm(x, w[b + ".norm1.weight"]), tab[:, 1], tab[:, 0], seg)
                 x = gated_add(x, qkv_attention(w, b + ".attn", h, angles, trigonometry), tab[:, 2], seg)
                 h = shifted_fused(norm(x, w[b + ".norm2.weight"]), tab[:, 4], tab[:, 3], seg)
