@@ -7,6 +7,7 @@ import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
+from functools import cache
 from pathlib import Path
 
 import mlx.core as mx
@@ -86,6 +87,102 @@ def w8a8(x, weight, scale):
     return mx.fast.convrot_matmul_quantized(xq, xs, weight, scale.reshape(-1), x.dtype, tiles=(bm, bn, bk))
 
 
+# (ain-soph fork, 2026-11-18) W8A16 for ConvRot weights: the activations are rotated into the weights' basis but stay
+# bfloat16, and the GEMM reads the int8 rows directly (M5 TensorOps bfloat x int8 -> float), so nothing is dequantized
+# to memory. Used per projection class (Weights.w8a16): the text encoder runs its MLP down_proj this way by default
+# (text.text_w8a16), where int8 activations lose the most (encoder error against BF16 1.2-1.5% -> 0.4-0.9%); the other
+# classes stay W8A8, which is faster there at long prompts.
+_ROTATE = """
+    const uint t = thread_position_in_threadgroup.x;
+    const uint row = threadgroup_position_in_grid.y;
+    const uint g = threadgroup_position_in_grid.x;
+    const uint K = x_shape[1];
+    threadgroup float buf[256];
+    float a = float(x[(size_t)row * K + g * 256 + t]);
+    for (uint s = 1; s < 256; s *= 4) {
+        buf[t] = a;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const uint k = (t / s) % 4, base = t - k * s;
+        a = buf[base] + buf[base + s] + buf[base + 2 * s] + buf[base + 3 * s] - 2.0f * buf[base + (3 - k) * s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    xr[(size_t)row * K + g * 256 + t] = T(a * 0.0625f);
+"""
+
+_W8A16 = """
+const int K = x_shape[1];
+const int Mx = x_shape[0];
+const int M = rows[0];
+const int N = wq_shape[0];
+const int m0 = int(threadgroup_position_in_grid.y) * BM;
+const int n_lo = int(threadgroup_position_in_grid.x) * BN;
+const int n0 = min(n_lo, N - BN);
+constexpr auto desc = matmul2d_descriptor(BM, BN, BK, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
+matmul2d<desc, execution_simdgroups<4>> op;
+tensor<device T, dextents<int, 2>, tensor_inline> A((device T*)x, dextents<int, 2>(K, Mx));
+tensor<device int8_t, dextents<int, 2>, tensor_inline> B((device int8_t*)wq, dextents<int, 2>(K, N));
+auto a0 = A.template slice<BK, BM>(0, m0);
+auto b0 = B.template slice<BK, BN>(0, n0);
+auto cT = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+for (uint16_t i = 0; i < cT.get_capacity(); ++i) cT[i] = 0;
+for (int k0 = 0; k0 < K; k0 += BK) {
+  auto a = A.template slice<BK, BM>(k0, m0);
+  auto b = B.template slice<BK, BN>(k0, n0);
+  op.run(a, b, cT);
+}
+for (uint16_t i = 0; i < cT.get_capacity(); ++i) {
+  auto ids = cT.get_multidimensional_index(i);
+  const int n = n0 + ids[0], m = m0 + ids[1];
+  if (m < M && n >= n_lo && n < N) y[(size_t)m * N + n] = T(cT[i] * ws[n]);
+}
+"""
+
+
+@cache
+def _rotate_kernel():
+    return mx.fast.metal_kernel(name="convrot_rotate", input_names=["x"], output_names=["xr"], source=_ROTATE)
+
+
+@cache
+def _w8a16_kernel():
+    header = (Path(__file__).resolve().parent / "kernels" / "mpp_tensor_ops.metal").read_text()
+    return mx.fast.metal_kernel(name="convrot_w8a16", input_names=["x", "wq", "ws", "rows"], output_names=["y"],
+                                header=header, source=_W8A16)
+
+
+def rotate(x, pad_rows=1):
+    """x H256 (block-diagonal along the last axis) in x's dtype, rows allocated up to a multiple of pad_rows (the
+    extra rows are left unset: they only feed GEMM output rows that are never stored)."""
+    rows, k = x.shape
+    (xr,) = _rotate_kernel()(
+        inputs=[x], template=[("T", x.dtype)], grid=(k, rows, 1), threadgroup=(256, 1, 1),
+        output_shapes=[(-(-rows // pad_rows) * pad_rows, k)], output_dtypes=[x.dtype])
+    return xr
+
+
+def w8a16(x, weight, scale):
+    """x @ W.T for a ConvRot int8 weight with bfloat16 (x's dtype) activations: rotate x, then a TensorOps GEMM that
+    reads the int8 weight rows as they are and applies the float32 row scales to the float sums. H3_W8A16_TILES=bm,bn,bk
+    overrides the tiles (A/B). Without TensorOps (or narrower than one tile) the weight is dequantized in float32."""
+    rows, n = x.shape[0], weight.shape[0]
+    # Tile sweep on the text encoder's down_proj (N 5120, K 25600) on an M5 Ultra, 2026-11-23: 32x128 is the fastest
+    # up to 64 rows (32 rows: 0.37 ms against 0.80 ms for 64x128), 64x64 above (176 / 1047 / 4152 rows: 0.68 / 4.48 /
+    # 23.0 ms against 1.06 / 6.86 / 27.6 ms). The float sums run over K in the same order for every tiling: same bytes.
+    bm, bn, bk = (32, 128, 64) if rows <= 64 else (64, 64, 64)
+    if os.environ.get("H3_W8A16_TILES"):
+        bm, bn, bk = (int(v) for v in os.environ["H3_W8A16_TILES"].split(","))
+    if backend.get() != "w8a8" or x.ndim != 2 or x.shape[1] % 256 or n < bn:
+        xr = (x.astype(mx.float32).reshape(-1, 256) @ H256).reshape(x.shape)
+        return ((xr @ weight.astype(mx.float32).T) * scale.reshape(1, -1)).astype(x.dtype)
+    xr = rotate(x, pad_rows=bm)
+    (y,) = _w8a16_kernel()(
+        inputs=[xr, weight, scale.reshape(-1), mx.array([rows], dtype=mx.int32)],
+        template=[("BM", bm), ("BN", bn), ("BK", bk), ("T", x.dtype)],
+        grid=((n + bn - 1) // bn * 128, (rows + bm - 1) // bm, 1), threadgroup=(128, 1, 1),
+        output_shapes=[(rows, n)], output_dtypes=[x.dtype])
+    return y
+
+
 def _read_owned(fd, length, offset):
     """Read a tensor into owned storage using complete pages up to EOF."""
     if not length:
@@ -118,6 +215,7 @@ class Weights:
         self.resident = resident
         self.cache = {}
         self.int8_calls = 0
+        self.w8a16 = frozenset()  # projection names (q, k, v, o, gate, up, down) run as W8A16; see w8a16()
         self.validated_projections = set()
         # Opt-in knobs. None of them changes a single weight byte or the op graph.
         self.pool = ThreadPoolExecutor(1) if flag("H3_PREFETCH") else None
@@ -243,7 +341,10 @@ class Weights:
                     raise ValueError(f"Unsupported quantization: {prefix}: {metadata}")
                 self.validated_projections.add(prefix)
             self.int8_calls += 1
-            y = w8a8(x, w, self[prefix + ".weight_scale"])
+            if prefix.rsplit(".", 1)[-1].removesuffix("_proj") in self.w8a16:
+                y = w8a16(x, w, self[prefix + ".weight_scale"])
+            else:
+                y = w8a8(x, w, self[prefix + ".weight_scale"])
         else:
             y = x @ w.astype(x.dtype).T
         if self.lora is not None:

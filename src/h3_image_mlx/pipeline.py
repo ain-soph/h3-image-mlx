@@ -20,7 +20,7 @@ from .models import check_models, manifest_for, model_paths, text_file
 # installed MLX build, and on the environment switches that change the stage's numbers. A hit hands the next stage
 # the very file a miss would have written, so the image is the same bytes either way.
 CACHE_RECIPE = "ain-soph-stage-cache-v1"
-NUMERIC_ENV = ("H3_ROTATE", "H3_GEMM_TILES")
+NUMERIC_ENV = ("H3_ROTATE", "H3_GEMM_TILES", "H3_TE_W8A16", "H3_W8A16_TILES")
 CACHE_MB_DEFAULT = {"H3_EMBED_CACHE_MB": 1024, "H3_REF_CACHE_MB": 256}
 
 

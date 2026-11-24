@@ -1,9 +1,12 @@
+import os
+import re
 import unittest
+from unittest import mock
 
 import mlx.core as mx
 import numpy as np
 
-from h3_image_mlx import core, dit, gate_norm
+from h3_image_mlx import core, dit, gate_norm, text
 
 
 class FusedBlockOps(unittest.TestCase):
@@ -63,6 +66,54 @@ class FusedSeam(unittest.TestCase):
     def test_single_row_width(self):
         self.check(300, 3072, 3)
         self.check(21, 64, 4)
+
+
+class W8A16(unittest.TestCase):
+    """core.w8a16 (rotate + TensorOps bfloat16 x int8 GEMM) against float32 math on the same rotated rows, including
+    row counts that are not a tile multiple and widths that end in an overlapping last tile."""
+
+    def test_against_float(self):
+        if not re.search(r"\bApple M5\b", mx.device_info()["device_name"]):
+            self.skipTest("TensorOps W8A16 needs an M5 GPU")
+        rng = np.random.default_rng(0)
+        token = core.backend.set("w8a8")
+        try:
+            for rows, k, n in [(5, 512, 200), (37, 768, 384), (70, 512, 130), (64, 256, 128), (129, 512, 191)]:
+                x = mx.array(rng.standard_normal((rows, k)), dtype=mx.bfloat16)
+                wq = mx.array(rng.integers(-127, 128, (n, k)), dtype=mx.int8)
+                s = mx.array(rng.random(n) * 0.01 + 0.001, dtype=mx.float32)
+                xr = core.rotate(x)[:rows].astype(mx.float32)
+                exact = (x.astype(mx.float32).reshape(-1, 256) @ core.H256).reshape(x.shape)
+                self.assertLess(mx.max(mx.abs(xr - exact)).item(), 0.05)
+                y = core.w8a16(x, wq, s).astype(mx.float32)
+                ref = (xr @ wq.astype(mx.float32).T) * s.reshape(1, -1)
+                self.assertEqual(y.shape, (rows, n))
+                self.assertLess(mx.max(mx.abs(y - ref) / (mx.abs(ref) + 1e-3)).item(), 2 ** -7)
+        finally:
+            core.backend.reset(token)
+
+
+class TextW8A16Classes(unittest.TestCase):
+    def test_parse(self):
+        token = core.backend.set("w8a8")
+        try:
+            with mock.patch.dict(os.environ):
+                os.environ.pop("H3_TE_W8A16", None)
+                self.assertEqual(text.text_w8a16(), {"down"})
+                os.environ["H3_TE_W8A16"] = "none"
+                self.assertEqual(text.text_w8a16(), set())
+                os.environ["H3_TE_W8A16"] = " down, k "
+                self.assertEqual(text.text_w8a16(), {"down", "k"})
+                os.environ["H3_TE_W8A16"] = "all"
+                self.assertEqual(len(text.text_w8a16()), 7)
+                os.environ["H3_TE_W8A16"] = "dwon"
+                with self.assertRaises(ValueError):
+                    text.text_w8a16()
+                core.backend.set("portable")
+                os.environ.pop("H3_TE_W8A16")
+                self.assertEqual(text.text_w8a16(), set())
+        finally:
+            core.backend.reset(token)
 
 
 if __name__ == "__main__":
