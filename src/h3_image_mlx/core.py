@@ -165,6 +165,16 @@ def w8a16(x, weight, scale):
     reads the int8 weight rows as they are and applies the float32 row scales to the float sums. H3_W8A16_TILES=bm,bn,bk
     overrides the tiles (A/B). Without TensorOps (or narrower than one tile) the weight is dequantized in float32."""
     rows, n = x.shape[0], weight.shape[0]
+    # (ain-soph fork, 2026-11-24) MLX's own W8A16 (mx.fast.convrot_matmul_w8a16, ain-soph/mlx branch convrot-w8a16):
+    # the int8 rows go into MLX's NAX GEMM. split_k=1 keeps one pass over K, so the float sums run in K order as in
+    # the kernel below: the same bytes. (Splitting K is faster in isolation but changes the bytes, the encoder's
+    # attention-sink row included, and its partial sums cost memory.) Used from 257 rows (the kernel below is as fast
+    # or faster for fewer). down_proj, 2026-11-24, ms: 1047 rows 4.35 -> 3.94, 4152 21.0 -> 16.3, 16595 107 -> 63;
+    # in the encoder (real activations) e16 down_proj 3.95 -> 3.35 s, text stage -4 %. H3_W8A16_NATIVE=0 (or an
+    # H3_W8A16_TILES override) keeps the kernel below.
+    if (backend.get() == "w8a8" and rows > 256 and hasattr(mx.fast, "convrot_matmul_w8a16")
+            and not os.environ.get("H3_W8A16_TILES") and os.environ.get("H3_W8A16_NATIVE", "1") != "0"):
+        return mx.fast.convrot_matmul_w8a16(x, weight, scale.reshape(-1), split_k=1)
     # Tile sweep on the text encoder's down_proj (N 5120, K 25600) on an M5 Ultra, 2026-11-23: 32x128 is the fastest
     # up to 64 rows (32 rows: 0.37 ms against 0.80 ms for 64x128), 64x64 above (176 / 1047 / 4152 rows: 0.68 / 4.48 /
     # 23.0 ms against 1.06 / 6.86 / 27.6 ms). The float sums run over K in the same order for every tiling: same bytes.
