@@ -25,7 +25,11 @@ from . import gate_norm
 #             attention's gated residual + RMSNorm + shift/scale in one kernel (norm2) (gate_norm.py, after mlx-serve's
 #             msv_gate_norm_mod) instead of gated add, rms_norm and shift kernels. Not across blocks (the MLP residual
 #             with the next block's norm1): that was 2-3% slower at 2048^2 / 1 picture and kept more memory.
+#             Only for sequences up to H3_SEAM_FUSION_ROWS rows (default 4096): a custom kernel cannot write its result
+#             over its input as the compiled ops do, so longer sequences kept more memory for no gain (1024^2 + 16
+#             pictures, 34003 rows: DiT footprint 9.7 -> 10.6 GB, over the 10 GB budget; 2048^2 no faster).
 _FUSION_ALL = ("modulate", "swiglu", "rope", "norm")
+SEAM_FUSION_ROWS = int(os.environ.get("H3_SEAM_FUSION_ROWS") or 4096)
 
 
 def fused(name):
@@ -372,7 +376,7 @@ def denoise(
         streams = [w.linear("audio_patch_proj", sound)] if audio else []
         streams.append(w.linear("video_patch_proj", patches))
         x = mx.concatenate([prefix, *(s.astype(text.dtype) for s in streams)])
-        seam = seg is not None and fused("norm") and gate_norm.supported(x)
+        seam = seg is not None and fused("norm") and x.shape[0] <= SEAM_FUSION_ROWS and gate_norm.supported(x)
         for i, b in enumerate(blocks):
             if (i < 49 or step < last) and not (native and step > 0):
                 w.ahead(blocks[(i + 1) % 50], keep=(b,))
